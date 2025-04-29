@@ -969,6 +969,8 @@ parse_specifier (GLogItem *logitem, const char **str, const char *p, const char 
   uint64_t bandw = 0, serve_time = 0;
   int dspc = 0, fmtspcs = 0;
 
+  int expected = 0;
+
   errno = 0;
   memset (&tm, 0, sizeof (tm));
   tm.tm_isdst = -1;
@@ -1195,7 +1197,9 @@ parse_specifier (GLogItem *logitem, const char **str, const char *p, const char 
     if (tkn == bEnd || *bEnd != '\0' || errno == ERANGE)
       bandw = 0;
     logitem->resp_size = bandw;
-    __sync_bool_compare_and_swap (&conf.bandwidth, 0, 1); /* set flag */
+    __atomic_compare_exchange_n(&conf.bandwidth, &expected, 1, false,
+                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST
+                                ); /* set flag */
     free (tkn);
     break;
     /* referrer */
@@ -1264,7 +1268,9 @@ parse_specifier (GLogItem *logitem, const char **str, const char *p, const char 
     logitem->serve_time = (serve_secs > 0) ? serve_secs * MILS : 0;
 
     /* Determine if time-served data was stored on-disk. */
-    __sync_bool_compare_and_swap (&conf.serve_usecs, 0, 1); /* set flag */
+    __atomic_compare_exchange_n(&conf.serve_usecs, &expected, 1, false,
+                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST
+                                ); /* set flag */
     free (tkn);
     break;
     /* time taken to serve the request, in seconds with a milliseconds
@@ -1287,7 +1293,9 @@ parse_specifier (GLogItem *logitem, const char **str, const char *p, const char 
     logitem->serve_time = (serve_secs > 0) ? serve_secs * SECS : 0;
 
     /* Determine if time-served data was stored on-disk. */
-    __sync_bool_compare_and_swap (&conf.serve_usecs, 0, 1); /* set flag */
+    __atomic_compare_exchange_n(&conf.serve_usecs, &expected, 1, false,
+                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST
+                                ); /* set flag */
     free (tkn);
     break;
     /* time taken to serve the request, in microseconds */
@@ -1304,7 +1312,9 @@ parse_specifier (GLogItem *logitem, const char **str, const char *p, const char 
     logitem->serve_time = serve_time;
 
     /* Determine if time-served data was stored on-disk. */
-    __sync_bool_compare_and_swap (&conf.serve_usecs, 0, 1); /* set flag */
+    __atomic_compare_exchange_n(&conf.serve_usecs, &expected, 1, false,
+                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST
+                                ); /* set flag */
     free (tkn);
     break;
     /* time taken to serve the request, in nanoseconds */
@@ -1323,7 +1333,9 @@ parse_specifier (GLogItem *logitem, const char **str, const char *p, const char 
     logitem->serve_time = (serve_time > 0) ? serve_time / MILS : 0;
 
     /* Determine if time-served data was stored on-disk. */
-    __sync_bool_compare_and_swap (&conf.serve_usecs, 0, 1); /* set flag */
+    __atomic_compare_exchange_n(&conf.serve_usecs, &expected, 1, false,
+                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST
+                                ); /* set flag */
     free (tkn);
     break;
     /* UMS: Krypto (TLS) "ECDHE-RSA-AES128-GCM-SHA256" */
@@ -1935,10 +1947,24 @@ atomic_lpts_update (GLog *glog, GLogItem *logitem) {
   int64_t oldts = 0, newts = 0;
   /* atomic update loop */
   newts = mktime (&logitem->dt); // Get timestamp from logitem->dt
-  while (!__sync_bool_compare_and_swap (&glog->lp.ts, oldts, newts)) {
-    oldts = glog->lp.ts; /* Reread glog->lp.ts if CAS failed */
+  while (1) {
+    uint64_t expected = oldts; // Expected value for CAS
+    int success = __atomic_compare_exchange_n(
+        &glog->lp.ts,           // Address of the variable
+        &expected,              // Pointer to the expected value
+        newts,                  // New value to set
+        false,                  // Strong CAS
+        __ATOMIC_SEQ_CST,       // Memory order for success
+        __ATOMIC_SEQ_CST        // Memory order for failure
+    );
+
+    if (success) {
+      break; // CAS succeeded
+    }
+
+    oldts = expected; // Update oldts with the current value if CAS failed
     if (oldts >= newts) {
-      break;    /* No need to update if oldts is already greater */
+      break; // No need to update if oldts is already greater
     }
   }
 
